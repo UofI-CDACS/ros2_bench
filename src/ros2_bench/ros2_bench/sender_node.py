@@ -56,17 +56,17 @@ import os
 import re
 import socket
 import subprocess
-import time
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _mono_ns() -> int:
     """Monotonic nanosecond timestamp — always from Machine A's clock."""
@@ -78,77 +78,88 @@ def _measure_icmp_baseline(host: str, samples: int, logger) -> float | None:
     Fire `samples` pings at `host`, return the *median* RTT in milliseconds.
     Returns None if ping fails (e.g. firewall blocks ICMP).
     """
-    logger.info(f'Running ICMP baseline: {samples} pings → {host} …')
+    logger.info(f"Running ICMP baseline: {samples} pings → {host} …")
     try:
         result = subprocess.run(
-            ['ping', '-c', str(samples), '-q', host],
+            ["ping", "-c", str(samples), "-q", host],
             capture_output=True,
             text=True,
             timeout=samples * 2 + 5,  # generous timeout
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        logger.warn(f'ping failed: {exc}')
+        logger.warn(f"ping failed: {exc}")
         return None
 
     # Parse "rtt min/avg/max/mdev = 0.412/0.531/0.812/0.091 ms"
     match = re.search(
-        r'rtt min/avg/max/mdev\s*=\s*([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)\s*ms',
+        r"rtt min/avg/max/mdev\s*=\s*([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)\s*ms",
         result.stdout,
     )
     if not match:
-        logger.warn(f'Could not parse ping output:\n{result.stdout}')
+        logger.warn(f"Could not parse ping output:\n{result.stdout}")
         return None
 
     avg_ms = float(match.group(2))
-    logger.info(f'ICMP baseline  min/avg/max = '
-                f'{match.group(1)}/{match.group(2)}/{match.group(3)} ms')
+    logger.info(
+        f"ICMP baseline  min/avg/max = "
+        f"{match.group(1)}/{match.group(2)}/{match.group(3)} ms"
+    )
     return avg_ms
 
 
 def _detect_rmw() -> str:
     """Read RMW_IMPLEMENTATION env var; fall back to a readable default."""
-    return os.environ.get('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp (default)')
+    return os.environ.get("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp (default)")
 
 
 # ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
 
-class SenderNode(Node):
 
+class SenderNode(Node):
     def __init__(self):
-        super().__init__('bench_sender')
+        super().__init__("bench_sender")
 
         # -- parameters -------------------------------------------------------
-        self.declare_parameter('responder_ip',    '')
-        self.declare_parameter('send_count',      100)
-        self.declare_parameter('send_interval_ms', 100)
-        self.declare_parameter('ping_samples',    20)
-        self.declare_parameter('ping_topic',      '/bench/ping')
-        self.declare_parameter('pong_topic',      '/bench/pong')
+        self.declare_parameter("responder_ip", "")
+        self.declare_parameter("send_count", 100)
+        self.declare_parameter("send_interval_ms", 100)
+        self.declare_parameter("ping_samples", 20)
+        self.declare_parameter("ping_topic", "/bench/ping")
+        self.declare_parameter("pong_topic", "/bench/pong")
 
-        self._responder_ip    = self.get_parameter('responder_ip').get_parameter_value().string_value
-        self._send_count      = self.get_parameter('send_count').get_parameter_value().integer_value
-        self._interval_s      = self.get_parameter('send_interval_ms').get_parameter_value().integer_value / 1000.0
-        self._ping_samples    = self.get_parameter('ping_samples').get_parameter_value().integer_value
-        ping_topic            = self.get_parameter('ping_topic').get_parameter_value().string_value
-        pong_topic            = self.get_parameter('pong_topic').get_parameter_value().string_value
+        self._responder_ip = (
+            self.get_parameter("responder_ip").get_parameter_value().string_value
+        )
+        self._send_count = (
+            self.get_parameter("send_count").get_parameter_value().integer_value
+        )
+        self._interval_s = (
+            self.get_parameter("send_interval_ms").get_parameter_value().integer_value
+            / 1000.0
+        )
+        self._ping_samples = (
+            self.get_parameter("ping_samples").get_parameter_value().integer_value
+        )
+        ping_topic = self.get_parameter("ping_topic").get_parameter_value().string_value
+        pong_topic = self.get_parameter("pong_topic").get_parameter_value().string_value
 
         if not self._responder_ip:
             self.get_logger().fatal(
                 'Parameter "responder_ip" is required.\n'
-                '  ros2 run ros2_bench sender --ros-args -p responder_ip:=<IP>'
+                "  ros2 run ros2_bench sender --ros-args -p responder_ip:=<IP>"
             )
             raise SystemExit(1)
 
         # -- state ------------------------------------------------------------
-        self._rmw             = _detect_rmw()
-        self._sender_host     = socket.gethostname()
-        self._ping_baseline   = None   # filled before first send
-        self._pending: dict[int, int] = {}   # seq → t_send_ns
-        self._seq             = 0
-        self._received        = 0
-        self._lock            = threading.Lock()
+        self._rmw = _detect_rmw()
+        self._sender_host = socket.gethostname()
+        self._ping_baseline = None  # filled before first send
+        self._pending: dict[int, int] = {}  # seq → t_send_ns
+        self._seq = 0
+        self._received = 0
+        self._lock = threading.Lock()
 
         # -- pub / sub --------------------------------------------------------
         self._pub = self.create_publisher(String, ping_topic, qos_profile=10)
@@ -157,15 +168,13 @@ class SenderNode(Node):
         )
 
         self.get_logger().info(
-            f'SenderNode ready  |  {self._sender_host} → {self._responder_ip}'
-            f'  |  RMW: {self._rmw}'
-            f'  |  {self._send_count} msgs @ {self._interval_s * 1000:.0f} ms intervals'
+            f"SenderNode ready  |  {self._sender_host} → {self._responder_ip}"
+            f"  |  RMW: {self._rmw}"
+            f"  |  {self._send_count} msgs @ {self._interval_s * 1000:.0f} ms intervals"
         )
 
         # -- kick off benchmark in a background thread so spin() can run -----
-        self._bench_thread = threading.Thread(
-            target=self._run_benchmark, daemon=True
-        )
+        self._bench_thread = threading.Thread(target=self._run_benchmark, daemon=True)
         self._bench_thread.start()
 
     # -------------------------------------------------------------------------
@@ -177,34 +186,36 @@ class SenderNode(Node):
         try:
             data = json.loads(msg.data)
         except json.JSONDecodeError:
-            self.get_logger().warn(f'Received non-JSON pong: {msg.data!r}')
+            self.get_logger().warn(f"Received non-JSON pong: {msg.data!r}")
             return
 
-        seq = data.get('seq')
-        t_send_ns = data.get('t_send_ns')
+        seq = data.get("seq")
+        t_send_ns = data.get("t_send_ns")
 
         if seq is None or t_send_ns is None:
-            self.get_logger().warn(f'Pong missing fields: {data}')
+            self.get_logger().warn(f"Pong missing fields: {data}")
             return
 
         rtt_ms = (t_recv_ns - t_send_ns) / 1_000_000.0
 
         # ROS2 overhead = RTT minus full ICMP ping round-trip baseline.
         # This gives a conservative (upper-bound) overhead estimate.
-        ping_ms     = self._ping_baseline
+        ping_ms = self._ping_baseline
         overhead_ms = (rtt_ms - ping_ms) if ping_ms is not None else None
 
         record = {
-            'seq':              seq,
-            't_send_ns':        t_send_ns,
-            't_recv_ns':        t_recv_ns,
-            'rtt_ms':           round(rtt_ms, 6),
-            'ping_ms':          round(ping_ms, 6) if ping_ms is not None else None,
-            'ros2_overhead_ms': round(overhead_ms, 6) if overhead_ms is not None else None,
-            'rmw':              self._rmw,
-            'sender_host':      self._sender_host,
-            'responder_ip':     self._responder_ip,
-            'msg_bytes':        len(msg.data.encode()),
+            "seq": seq,
+            "t_send_ns": t_send_ns,
+            "t_recv_ns": t_recv_ns,
+            "rtt_ms": round(rtt_ms, 6),
+            "ping_ms": round(ping_ms, 6) if ping_ms is not None else None,
+            "ros2_overhead_ms": round(overhead_ms, 6)
+            if overhead_ms is not None
+            else None,
+            "rmw": self._rmw,
+            "sender_host": self._sender_host,
+            "responder_ip": self._responder_ip,
+            "msg_bytes": len(msg.data.encode()),
         }
 
         # JSON-lines to stdout — easy to redirect / pipe to a DB exporter
@@ -225,10 +236,10 @@ class SenderNode(Node):
         )
 
         # 2. Brief pause to let the echo node subscriber connect
-        self.get_logger().info('Waiting 1 s for DDS discovery …')
+        self.get_logger().info("Waiting 1 s for DDS discovery …")
         time.sleep(1.0)
 
-        self.get_logger().info(f'Starting benchmark: {self._send_count} messages …')
+        self.get_logger().info(f"Starting benchmark: {self._send_count} messages …")
 
         for i in range(self._send_count):
             seq = self._seq
@@ -236,11 +247,13 @@ class SenderNode(Node):
 
             t_send_ns = _mono_ns()
 
-            payload = json.dumps({
-                'seq':       seq,
-                't_send_ns': t_send_ns,
-                'payload':   '',       # extend here for size sweep later
-            })
+            payload = json.dumps(
+                {
+                    "seq": seq,
+                    "t_send_ns": t_send_ns,
+                    "payload": "",  # extend here for size sweep later
+                }
+            )
 
             msg = String()
             msg.data = payload
@@ -253,7 +266,7 @@ class SenderNode(Node):
             time.sleep(self._interval_s)
 
         # 3. Wait a little for in-flight pongs to arrive
-        self.get_logger().info('All messages sent. Waiting for stragglers …')
+        self.get_logger().info("All messages sent. Waiting for stragglers …")
         time.sleep(max(2.0, self._interval_s * 5))
 
         # 4. Summary
@@ -261,9 +274,9 @@ class SenderNode(Node):
             lost = len(self._pending)
 
         self.get_logger().info(
-            f'Benchmark complete  |  sent={self._send_count}'
-            f'  received={self._received}'
-            f'  lost={lost}'
+            f"Benchmark complete  |  sent={self._send_count}"
+            f"  received={self._received}"
+            f"  lost={lost}"
         )
 
         # Signal the main thread to shut down
@@ -271,6 +284,7 @@ class SenderNode(Node):
 
 
 # ---------------------------------------------------------------------------
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -287,5 +301,5 @@ def main(args=None):
         node.destroy_node()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
