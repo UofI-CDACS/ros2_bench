@@ -19,6 +19,7 @@ Optionally override the topic names via ROS2 parameters:
 """
 
 import rclpy
+import socket
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -51,9 +52,45 @@ class EchoNode(Node):
 
     # -------------------------------------------------------------------------
 
+    def _local_ip() -> str:
+      # Try hostname resolution first
+      try:
+          ip = socket.gethostbyname(socket.gethostname())
+          if ip and not ip.startswith("127."):
+              return ip
+      except Exception:
+          pass
+  
+      # Iterate interfaces
+      try:
+          import netifaces
+          for iface in netifaces.interfaces():
+              addrs = netifaces.ifaddresses(iface)
+              for a in addrs.get(netifaces.AF_INET, []):
+                  ip = a.get('addr')
+                  if ip and not ip.startswith("127."):
+                      return ip
+      except ImportError:
+          pass
+  
+      return "127.0.0.1"
+
+    # -------------------------------------------------------------------------
+
     def _on_ping(self, msg: String) -> None:
-        """Immediately republish the received message to the pong topic."""
-        self._pub.publish(msg)
+        """(ALMOST) Immediately republish the received message to the pong topic."""
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().warn(f"Received non-JSON ping: {msg.data!r}")
+            return
+    
+        data['responder_ip'] = _local_ip()
+        data['responder_node'] = self.get_name()
+    
+        pong_msg = String()
+        pong_msg.data = json.dumps(data)
+        self._pub.publish(pong_msg)
 
 
 # -----------------------------------------------------------------------------
