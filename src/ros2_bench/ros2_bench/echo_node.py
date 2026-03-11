@@ -26,6 +26,34 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 
+def _local_ip() -> str:
+    # Try hostname resolution first
+    try:
+        ip = socket.gethostbyname(socket.gethostname())
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+
+    # Iterate interfaces
+    try:
+        import netifaces
+
+        for iface in netifaces.interfaces():
+            addrs = netifaces.ifaddresses(iface)
+            for a in addrs.get(netifaces.AF_INET, []):
+                ip = a.get("addr")
+                if ip and not ip.startswith("127."):
+                    return ip
+    except ImportError:
+        pass
+
+    return "127.0.0.1"
+
+
+# -------------------------------------------------------------------------
+
+
 class EchoNode(Node):
     def __init__(self):
         super().__init__("bench_echo")
@@ -50,32 +78,6 @@ class EchoNode(Node):
         self.get_logger().info(
             f'EchoNode ready  |  listening on "{ping_topic}"  →  replying on "{pong_topic}"'
         )
-
-    # -------------------------------------------------------------------------
-
-    def _local_ip() -> str:
-        # Try hostname resolution first
-        try:
-            ip = socket.gethostbyname(socket.gethostname())
-            if ip and not ip.startswith("127."):
-                return ip
-        except Exception:
-            pass
-
-        # Iterate interfaces
-        try:
-            import netifaces
-
-            for iface in netifaces.interfaces():
-                addrs = netifaces.ifaddresses(iface)
-                for a in addrs.get(netifaces.AF_INET, []):
-                    ip = a.get("addr")
-                    if ip and not ip.startswith("127."):
-                        return ip
-        except ImportError:
-            pass
-
-        return "127.0.0.1"
 
     # -------------------------------------------------------------------------
 
