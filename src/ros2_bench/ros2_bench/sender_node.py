@@ -21,17 +21,21 @@ Workflow per message
       "rmw":              "rmw_fastrtps_cpp",
       "sender_host":      "pi-a",
       "responder_ip":     "192.168.1.101",
+      "responder_node":   "bench_echo",
       "msg_bytes":        64
     }
 
 ICMP baseline
 -------------
-A burst of pings is sent to the responder IP *before* the benchmark starts.
-The median round-trip from ping is stored and subtracted from every ROS2 RTT
+A burst of pings is sent to the responder IP *once per responder*.
+The median round-trip is stored and subtracted from every ROS2 RTT
 to estimate middleware overhead.
 
 Because both t_send_ns and t_recv_ns are taken on Machine A with the same
 monotonic clock, the calculation is valid even without NTP sync.
+
+This version runs ICMP baseline asynchronously in a background thread
+so that incoming messages are never blocked by ping measurement.
 
 Launch
 ------
@@ -145,10 +149,19 @@ class SenderNode(Node):
         self._responders: dict[
             tuple[str, str], dict
         ] = {}  # (ip, node) -> {'baseline': ms or None, 'last_rtt': ms}
+
         self._pending: dict[int, int] = {}  # seq → t_send_ns
         self._seq = 0
         self._received = 0
         self._lock = threading.Lock()
+
+        # -- async ICMP baseline handling -------------------------------------
+        self._baseline_queue: list[tuple[str, str]] = []  # queue of new responders
+        self._baseline_lock = threading.Lock()
+        self._baseline_thread = threading.Thread(
+            target=self._baseline_worker, daemon=True
+        )
+        self._baseline_thread.start()
 
         # -- pub / sub --------------------------------------------------------
         self._pub = self.create_publisher(String, ping_topic, qos_profile=10)
@@ -167,6 +180,22 @@ class SenderNode(Node):
         # -- kick off benchmark in a background thread so spin() can run -----
         self._bench_thread = threading.Thread(target=self._run_benchmark, daemon=True)
         self._bench_thread.start()
+
+    # -------------------------------------------------------------------------
+
+    def _baseline_worker(self):
+        """Background thread: process ICMP baseline queue for each new responder"""
+        while True:
+            with self._baseline_lock:
+                if not self._baseline_queue:
+                    time.sleep(0.1)
+                    continue
+                key = self._baseline_queue.pop(0)
+            ip, node = key
+            baseline = _measure_icmp_baseline(ip, self._ping_samples, self.get_logger())
+            with self._lock:
+                if key in self._responders:
+                    self._responders[key]["baseline"] = baseline
 
     # -------------------------------------------------------------------------
 
@@ -194,13 +223,15 @@ class SenderNode(Node):
         key = (responder_ip, responder_node)
 
         if key not in self._responders:
-            baseline = _measure_icmp_baseline(
-                responder_ip, self._ping_samples, self.get_logger()
-            )
-            self._responders[key] = {"baseline": baseline, "last_rtt": rtt_ms}
+            # first time seeing this responder
+            self._responders[key] = {"baseline": None, "last_rtt": rtt_ms}
+            # schedule async ICMP baseline
+            with self._baseline_lock:
+                self._baseline_queue.append(key)
         else:
             self._responders[key]["last_rtt"] = rtt_ms
-            baseline = self._responders[key]["baseline"]
+
+        baseline = self._responders[key]["baseline"]
 
         # ROS2 overhead = RTT minus full ICMP ping round-trip baseline.
         # This gives a conservative (upper-bound) overhead estimate.
