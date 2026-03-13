@@ -36,14 +36,12 @@ monotonic clock, the calculation is valid even without NTP sync.
 Launch
 ------
   ros2 run ros2_bench sender --ros-args \\
-      -p responder_ip:=192.168.1.101 \\
       -p send_count:=100             \\
       -p send_interval_ms:=100       \\
       -p ping_samples:=20
 
 Parameters
 ----------
-responder_ip     IP of the echo node machine                 (required)
 send_count       Number of messages to send                  (default 100)
 send_interval_ms Milliseconds between sends                  (default 100)
 ping_samples     ICMP pings to fire for baseline measurement (default 20)
@@ -122,16 +120,12 @@ class SenderNode(Node):
         super().__init__("bench_sender")
 
         # -- parameters -------------------------------------------------------
-        self.declare_parameter("responder_ip", "")
         self.declare_parameter("send_count", 100)
         self.declare_parameter("send_interval_ms", 100)
         self.declare_parameter("ping_samples", 20)
         self.declare_parameter("ping_topic", "/bench/ping")
         self.declare_parameter("pong_topic", "/bench/pong")
 
-        self._responder_ip = (
-            self.get_parameter("responder_ip").get_parameter_value().string_value
-        )
         self._send_count = (
             self.get_parameter("send_count").get_parameter_value().integer_value
         )
@@ -145,17 +139,12 @@ class SenderNode(Node):
         ping_topic = self.get_parameter("ping_topic").get_parameter_value().string_value
         pong_topic = self.get_parameter("pong_topic").get_parameter_value().string_value
 
-        if not self._responder_ip:
-            self.get_logger().fatal(
-                'Parameter "responder_ip" is required.\n'
-                "  ros2 run ros2_bench sender --ros-args -p responder_ip:=<IP>"
-            )
-            raise SystemExit(1)
-
         # -- state ------------------------------------------------------------
         self._rmw = _detect_rmw()
         self._sender_host = socket.gethostname()
-        self._ping_baseline = None  # filled before first send
+        self._responders: dict[
+            tuple[str, str], dict
+        ] = {}  # (ip, node) -> {'baseline': ms or None, 'last_rtt': ms}
         self._pending: dict[int, int] = {}  # seq → t_send_ns
         self._seq = 0
         self._received = 0
@@ -168,9 +157,11 @@ class SenderNode(Node):
         )
 
         self.get_logger().info(
-            f"SenderNode ready  |  {self._sender_host} → {self._responder_ip}"
-            f"  |  RMW: {self._rmw}"
-            f"  |  {self._send_count} msgs @ {self._interval_s * 1000:.0f} ms intervals"
+            f"SenderNode ready  |  host={self._sender_host}"
+            f"  |  RMW={self._rmw}"
+            f"  |  send_count={self._send_count}"
+            f"  |  interval_ms={self._interval_s * 1000:.0f}"
+            "  |  responders=auto-discovery"
         )
 
         # -- kick off benchmark in a background thread so spin() can run -----
@@ -198,23 +189,36 @@ class SenderNode(Node):
 
         rtt_ms = (t_recv_ns - t_send_ns) / 1_000_000.0
 
+        responder_ip = data.get("responder_ip", "unknown")
+        responder_node = data.get("responder_node", "unknown")
+        key = (responder_ip, responder_node)
+
+        if key not in self._responders:
+            baseline = _measure_icmp_baseline(
+                responder_ip, self._ping_samples, self.get_logger()
+            )
+            self._responders[key] = {"baseline": baseline, "last_rtt": rtt_ms}
+        else:
+            self._responders[key]["last_rtt"] = rtt_ms
+            baseline = self._responders[key]["baseline"]
+
         # ROS2 overhead = RTT minus full ICMP ping round-trip baseline.
         # This gives a conservative (upper-bound) overhead estimate.
-        ping_ms = self._ping_baseline
-        overhead_ms = (rtt_ms - ping_ms) if ping_ms is not None else None
+        overhead_ms = (rtt_ms - baseline) if baseline is not None else None
 
         record = {
             "seq": seq,
             "t_send_ns": t_send_ns,
             "t_recv_ns": t_recv_ns,
             "rtt_ms": round(rtt_ms, 6),
-            "ping_ms": round(ping_ms, 6) if ping_ms is not None else None,
+            "ping_ms": round(baseline, 6) if baseline is not None else None,
             "ros2_overhead_ms": round(overhead_ms, 6)
             if overhead_ms is not None
             else None,
             "rmw": self._rmw,
             "sender_host": self._sender_host,
-            "responder_ip": self._responder_ip,
+            "responder_ip": responder_ip,
+            "responder_node": responder_node,
             "msg_bytes": len(msg.data.encode()),
         }
 
@@ -229,11 +233,6 @@ class SenderNode(Node):
 
     def _run_benchmark(self) -> None:
         """Background thread: measure baseline, then send all messages."""
-
-        # 1. ICMP baseline — must complete before we start sending
-        self._ping_baseline = _measure_icmp_baseline(
-            self._responder_ip, self._ping_samples, self.get_logger()
-        )
 
         # 2. Brief pause to let the echo node subscriber connect
         self.get_logger().info("Waiting 1 s for DDS discovery …")
