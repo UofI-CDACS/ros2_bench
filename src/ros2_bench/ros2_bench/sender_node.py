@@ -69,7 +69,6 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -123,30 +122,36 @@ def _detect_rmw() -> str:
 
 
 class SenderNode(Node):
-
     def __init__(self):
         super().__init__("bench_sender")
 
         # -- parameters -------------------------------------------------------
-        self.declare_parameter("send_count",       100)
+        self.declare_parameter("send_count", 100)
         self.declare_parameter("send_interval_ms", 100)
-        self.declare_parameter("ping_samples",     20)
-        self.declare_parameter("ping_topic",       "/bench/ping")
-        self.declare_parameter("pong_topic",       "/bench/pong")
+        self.declare_parameter("ping_samples", 20)
+        self.declare_parameter("ping_topic", "/bench/ping")
+        self.declare_parameter("pong_topic", "/bench/pong")
 
-        self._send_count   = self.get_parameter("send_count").get_parameter_value().integer_value
-        self._interval_s   = self.get_parameter("send_interval_ms").get_parameter_value().integer_value / 1000.0
-        self._ping_samples = self.get_parameter("ping_samples").get_parameter_value().integer_value
-        ping_topic         = self.get_parameter("ping_topic").get_parameter_value().string_value
-        pong_topic         = self.get_parameter("pong_topic").get_parameter_value().string_value
+        self._send_count = (
+            self.get_parameter("send_count").get_parameter_value().integer_value
+        )
+        self._interval_s = (
+            self.get_parameter("send_interval_ms").get_parameter_value().integer_value
+            / 1000.0
+        )
+        self._ping_samples = (
+            self.get_parameter("ping_samples").get_parameter_value().integer_value
+        )
+        ping_topic = self.get_parameter("ping_topic").get_parameter_value().string_value
+        pong_topic = self.get_parameter("pong_topic").get_parameter_value().string_value
 
         # -- identity ---------------------------------------------------------
         # UUID4 is generated fresh each time the node starts.
         # Using UUID rather than hostname so that two nodes on the same machine
         # (or two machines with the same hostname) never collide.
-        self._sender_id   = str(uuid.uuid4())
+        self._sender_id = str(uuid.uuid4())
         self._sender_host = socket.gethostname()
-        self._rmw         = _detect_rmw()
+        self._rmw = _detect_rmw()
 
         # -- shared state (all access must hold self._lock) -------------------
         #
@@ -161,10 +166,10 @@ class SenderNode(Node):
         #   Per-responder loss is tracked via received_seqs, not _pending.
         #
         self._responders: dict[tuple[str, str], dict] = {}
-        self._pending:    dict[int, int]              = {}
-        self._received    = 0
-        self._seq         = 0
-        self._lock        = threading.Lock()
+        self._pending: dict[int, int] = {}
+        self._received = 0
+        self._seq = 0
+        self._lock = threading.Lock()
 
         # -- baseline queue ---------------------------------------------------
         # queue.Queue is thread-safe and has a blocking .get() built in.
@@ -192,9 +197,7 @@ class SenderNode(Node):
         )
 
         # -- benchmark thread -------------------------------------------------
-        self._bench_thread = threading.Thread(
-            target=self._run_benchmark, daemon=True
-        )
+        self._bench_thread = threading.Thread(target=self._run_benchmark, daemon=True)
         self._bench_thread.start()
 
     # -------------------------------------------------------------------------
@@ -251,17 +254,17 @@ class SenderNode(Node):
         if data.get("sender_id") != self._sender_id:
             return
 
-        seq       = data.get("seq")
+        seq = data.get("seq")
         t_send_ns = data.get("t_send_ns")
 
         if seq is None or t_send_ns is None:
             self.get_logger().warn(f"Pong missing fields: {data}")
             return
 
-        rtt_ms         = (t_recv_ns - t_send_ns) / 1_000_000.0
-        responder_ip   = data.get("responder_ip",   "unknown")
+        rtt_ms = (t_recv_ns - t_send_ns) / 1_000_000.0
+        responder_ip = data.get("responder_ip", "unknown")
         responder_node = data.get("responder_node", "unknown")
-        key            = (responder_ip, responder_node)
+        key = (responder_ip, responder_node)
 
         new_responder = False
 
@@ -270,7 +273,7 @@ class SenderNode(Node):
                 # First time we have heard from this responder.
                 # Create its entry with baseline=None (will be filled async).
                 self._responders[key] = {
-                    "baseline":      None,
+                    "baseline": None,
                     "received_seqs": set(),
                 }
                 new_responder = True
@@ -289,20 +292,23 @@ class SenderNode(Node):
             self._baseline_q.put((responder_ip, responder_node))
 
         overhead_ms = (rtt_ms - baseline) if baseline is not None else None
-
+        callback_ms = (_mono_ns() - t_recv_ns) / 1_000_000.0
         record = {
-            "sender_id":        self._sender_id,
-            "seq":              seq,
-            "t_send_ns":        t_send_ns,
-            "t_recv_ns":        t_recv_ns,
-            "rtt_ms":           round(rtt_ms, 6),
-            "ping_ms":          round(baseline, 6) if baseline is not None else None,
-            "ros2_overhead_ms": round(overhead_ms, 6) if overhead_ms is not None else None,
-            "rmw":              self._rmw,
-            "sender_host":      self._sender_host,
-            "responder_ip":     responder_ip,
-            "responder_node":   responder_node,
-            "msg_bytes":        len(msg.data.encode()),
+            "sender_id": self._sender_id,
+            "seq": seq,
+            "t_send_ns": t_send_ns,
+            "t_recv_ns": t_recv_ns,
+            "rtt_ms": round(rtt_ms, 6),
+            "ping_ms": round(baseline, 6) if baseline is not None else None,
+            "t_callback_ms": round(callback_ms, 6),
+            "ros2_overhead_ms": round(overhead_ms - callback_ms, 6)
+            if overhead_ms is not None
+            else None,
+            "rmw": self._rmw,
+            "sender_host": self._sender_host,
+            "responder_ip": responder_ip,
+            "responder_node": responder_node,
+            "msg_bytes": len(msg.data.encode()),
         }
 
         print(json.dumps(record), flush=True)
@@ -328,14 +334,16 @@ class SenderNode(Node):
 
             t_send_ns = _mono_ns()
 
-            payload = json.dumps({
-                "sender_id": self._sender_id,
-                "seq":       seq,
-                "t_send_ns": t_send_ns,
-                "payload":   "",          # extend for message size sweep
-            })
+            payload = json.dumps(
+                {
+                    "sender_id": self._sender_id,
+                    "seq": seq,
+                    "t_send_ns": t_send_ns,
+                    "payload": "",  # extend for message size sweep
+                }
+            )
 
-            msg      = String()
+            msg = String()
             msg.data = payload
 
             with self._lock:
@@ -350,10 +358,9 @@ class SenderNode(Node):
 
         # --- Per-responder loss summary --------------------------------------
         with self._lock:
-            overall_lost  = len(self._pending)
+            overall_lost = len(self._pending)
             responder_snap = {
-                k: len(v["received_seqs"])
-                for k, v in self._responders.items()
+                k: len(v["received_seqs"]) for k, v in self._responders.items()
             }
 
         self.get_logger().info(
