@@ -66,6 +66,7 @@ import time
 import uuid
 
 import rclpy
+from rclpy.duration import Duration
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -385,11 +386,11 @@ class SenderNode(Node):
                 self._pending[seq] = t_send_ns
 
             self._pub.publish(msg)
-            time.sleep(self._interval_s)
+            self.get_clock().sleep_for(Duration(seconds=self._interval_s))
 
         # Wait for in-flight pongs
         self.get_logger().info("All messages sent. Waiting for stragglers …")
-        time.sleep(max(2.0, self._interval_s * 5))
+        self.get_clock().sleep_for(Duration(seconds=max(2.0, self._interval_s * 5)))
 
         # --- Per-responder loss summary --------------------------------------
         with self._lock:
