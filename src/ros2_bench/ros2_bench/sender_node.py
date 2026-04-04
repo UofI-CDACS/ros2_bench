@@ -181,6 +181,16 @@ class SenderNode(Node):
         )
         self._baseline_thread.start()
 
+        # -- message queue ----------------------------------------------------
+        # queue.Queue is thread-safe and has a blocking .get() built in.
+        # The baseline worker waits on it without holding any lock or sleeping.
+        # Items are (msg, recv_ns) tuples.
+        self._message_q: queue.Queue = queue.Queue()
+        self._message_thread = threading.Thread(
+            target=self._message_worker, daemon=True
+        )
+        self._message_thread.start()
+
         # -- pub / sub --------------------------------------------------------
         self._pub = self.create_publisher(String, ping_topic, qos_profile=10)
         self._sub = self.create_subscription(
@@ -233,6 +243,99 @@ class SenderNode(Node):
                     )
 
     # -------------------------------------------------------------------------
+    # Message worker
+    # -------------------------------------------------------------------------
+
+    def _message_worker(self) -> None:
+        """
+        Background thread. Blocks on the queue waiting for new messages.
+        When one arrives, complete the logging proccess. Unloads _on_pong from
+        time consuming operations, allowing us to proccess messsages faster.
+        In essence, utilizes SPACE (a queue) to save TIME.
+
+        queue.Queue.get() releases no locks and holds no locks — it simply
+        blocks until an item is available, so there is no contention with
+        _on_pong or _run_benchmark while waiting.
+        """
+
+        while True:
+            # Block here until a new message needs logged.
+            # timeout=1 lets the thread notice if the process is shutting down.
+            try:
+                msg, t_recv_ns = self._message_q.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            try:
+                data = json.loads(msg.data)
+            except json.JSONDecodeError:
+                self.get_logger().warn(f"Non-JSON pong ignored: {msg.data!r}")
+                return
+
+            # --- Filter: only process pongs addressed to this sender instance ---
+            if data.get("sender_id") != self._sender_id:
+                return
+
+            seq = data.get("seq")
+            t_send_ns = data.get("t_send_ns")
+
+            if seq is None or t_send_ns is None:
+                self.get_logger().warn(f"Pong missing fields: {data}")
+                return
+
+            rtt_ms = (t_recv_ns - t_send_ns) / 1_000_000.0
+            responder_ip = data.get("responder_ip", "unknown")
+            responder_node = data.get("responder_node", "unknown")
+            key = (responder_ip, responder_node)
+
+            new_responder = False
+
+            with self._lock:
+                if key not in self._responders:
+                    # First time we have heard from this responder.
+                    # Create its entry with baseline=None (will be filled async).
+                    self._responders[key] = {
+                        "baseline": None,
+                        "received_seqs": set(),
+                    }
+                    new_responder = True
+
+                self._responders[key]["received_seqs"].add(seq)
+                baseline = self._responders[key]["baseline"]
+
+                # Pop from _pending on first pong for this seq (any responder).
+                # This tracks overall send/receive accounting.
+                self._pending.pop(seq, None)
+                self._received += 1
+
+            # Schedule ICMP baseline outside the lock — queue.put() is thread-safe
+            # and does not need _lock held.
+            if new_responder:
+                self._baseline_q.put((responder_ip, responder_node))
+
+            overhead_ms = (rtt_ms - baseline) if baseline is not None else None
+            callback_ms = (_mono_ns() - t_recv_ns) / 1_000_000.0
+            record = {
+                "sender_id": self._sender_id,
+                "seq": seq,
+                "t_send_ns": t_send_ns,
+                "t_recv_ns": t_recv_ns,
+                "rtt_ms": round(rtt_ms, 6),
+                "ping_ms": round(baseline, 6) if baseline is not None else None,
+                "t_callback_ms": round(callback_ms, 6),
+                "ros2_overhead_ms": round(overhead_ms - callback_ms, 6)
+                if overhead_ms is not None
+                else None,
+                "rmw": self._rmw,
+                "sender_host": self._sender_host,
+                "responder_ip": responder_ip,
+                "responder_node": responder_node,
+                "msg_bytes": len(msg.data.encode()),
+            }
+
+            print(json.dumps(record), flush=True)
+
+    # -------------------------------------------------------------------------
     # Pong handler (called by rclpy.spin in the main thread)
     # -------------------------------------------------------------------------
 
@@ -242,76 +345,7 @@ class SenderNode(Node):
         addressed to this sender_id, then records RTT and updates per-responder
         state under _lock.
         """
-        t_recv_ns = _mono_ns()
-
-        try:
-            data = json.loads(msg.data)
-        except json.JSONDecodeError:
-            self.get_logger().warn(f"Non-JSON pong ignored: {msg.data!r}")
-            return
-
-        # --- Filter: only process pongs addressed to this sender instance ---
-        if data.get("sender_id") != self._sender_id:
-            return
-
-        seq = data.get("seq")
-        t_send_ns = data.get("t_send_ns")
-
-        if seq is None or t_send_ns is None:
-            self.get_logger().warn(f"Pong missing fields: {data}")
-            return
-
-        rtt_ms = (t_recv_ns - t_send_ns) / 1_000_000.0
-        responder_ip = data.get("responder_ip", "unknown")
-        responder_node = data.get("responder_node", "unknown")
-        key = (responder_ip, responder_node)
-
-        new_responder = False
-
-        with self._lock:
-            if key not in self._responders:
-                # First time we have heard from this responder.
-                # Create its entry with baseline=None (will be filled async).
-                self._responders[key] = {
-                    "baseline": None,
-                    "received_seqs": set(),
-                }
-                new_responder = True
-
-            self._responders[key]["received_seqs"].add(seq)
-            baseline = self._responders[key]["baseline"]
-
-            # Pop from _pending on first pong for this seq (any responder).
-            # This tracks overall send/receive accounting.
-            self._pending.pop(seq, None)
-            self._received += 1
-
-        # Schedule ICMP baseline outside the lock — queue.put() is thread-safe
-        # and does not need _lock held.
-        if new_responder:
-            self._baseline_q.put((responder_ip, responder_node))
-
-        overhead_ms = (rtt_ms - baseline) if baseline is not None else None
-        callback_ms = (_mono_ns() - t_recv_ns) / 1_000_000.0
-        record = {
-            "sender_id": self._sender_id,
-            "seq": seq,
-            "t_send_ns": t_send_ns,
-            "t_recv_ns": t_recv_ns,
-            "rtt_ms": round(rtt_ms, 6),
-            "ping_ms": round(baseline, 6) if baseline is not None else None,
-            "t_callback_ms": round(callback_ms, 6),
-            "ros2_overhead_ms": round(overhead_ms - callback_ms, 6)
-            if overhead_ms is not None
-            else None,
-            "rmw": self._rmw,
-            "sender_host": self._sender_host,
-            "responder_ip": responder_ip,
-            "responder_node": responder_node,
-            "msg_bytes": len(msg.data.encode()),
-        }
-
-        print(json.dumps(record), flush=True)
+        self._message_q.put((msg, _mono_ns()))
 
     # -------------------------------------------------------------------------
     # Benchmark thread
