@@ -315,6 +315,7 @@ class SenderNode(Node):
 
             overhead_ms = (rtt_ms - baseline) if baseline is not None else None
             callback_ms = (_mono_ns() - t_recv_ns) / 1_000_000.0
+
             record = {
                 "sender_id": self._sender_id,
                 "seq": seq,
@@ -323,7 +324,7 @@ class SenderNode(Node):
                 "rtt_ms": round(rtt_ms, 6),
                 "ping_ms": round(baseline, 6) if baseline is not None else None,
                 "t_callback_ms": round(callback_ms, 6),
-                "ros2_overhead_ms": round(overhead_ms - callback_ms, 6)
+                "ros2_overhead_ms": round(overhead_ms + callback_ms, 6)
                 if overhead_ms is not None
                 else None,
                 "rmw": self._rmw,
