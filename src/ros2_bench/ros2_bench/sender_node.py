@@ -66,7 +66,9 @@ import time
 import uuid
 
 import rclpy
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -194,8 +196,16 @@ class SenderNode(Node):
 
         # -- pub / sub --------------------------------------------------------
         self._pub = self.create_publisher(String, ping_topic, qos_profile=10)
+
+        # Create a reentrant callback group
+        reentrant_group = ReentrantCallbackGroup()
+
         self._sub = self.create_subscription(
-            String, pong_topic, self._on_pong, qos_profile=10
+            String,
+            pong_topic,
+            self._on_pong,
+            qos_profile=10,
+            callback_group=reentrant_group,
         )
 
         self.get_logger().info(
@@ -359,7 +369,7 @@ class SenderNode(Node):
         waits for stragglers and prints a per-responder loss summary.
         """
         self.get_logger().info("Waiting 1 s for DDS discovery …")
-        time.sleep(1.0)
+        self.get_clock().sleep_for(1.0)
 
         self.get_logger().info(f"Starting benchmark: {self._send_count} messages …")
 
@@ -428,7 +438,9 @@ def main(args=None):
         return
 
     try:
-        rclpy.spin(node)
+        executor = MultiThreadedExecutor(num_threads=4)
+        executor.add_node(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
