@@ -369,7 +369,7 @@ class SenderNode(Node):
         waits for stragglers and prints a per-responder loss summary.
         """
         self.get_logger().info("Waiting 1 s for DDS discovery …")
-        self.get_clock().sleep_for(Duration(1.0))
+        self.get_clock().sleep_for(Duration(seconds=1.0))
 
         self.get_logger().info(f"Starting benchmark: {self._send_count} messages …")
 
